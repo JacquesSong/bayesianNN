@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import tensorflow.compat.v1 as tf
 import seaborn as sns
 import os
+import time
+import warnings
 
 from matplotlib.backends import backend_agg
 from tensorflow.contrib.learn.python.learn.datasets import mnist
@@ -10,29 +12,31 @@ from absl import flags
 
 import tensorflow_probability as tfp
 
+warnings.simplefilter(action="ignore")
+tf.logging.set_verbosity(tf.logging.ERROR)
+
 tfd = tfp.distributions
 
 IMAGE_SHAPE = [28, 28, 1]
 
 flags.DEFINE_float("learning_rate",
-                   default=0.001,
+                   default=0.005,
                    help="Initial learning rate.")
 flags.DEFINE_integer("max_steps",
-                     default=100,
+                     default=1000,
                      help="Number of training steps to run.")
 flags.DEFINE_integer("batch_size",
                      default=128,
                      help="Batch size.")
 flags.DEFINE_string("data_dir",
-                    default=os.path.join(os.getenv("TEST_TMPDIR", "/tmp"),
-                                         "bayesian_neural_network/data"),
+                    default="/Users/jacques/Documents/GitHub/bayesianNN/data",
                     help="Directory where data is stored (if using real data).")
 flags.DEFINE_string("model_dir",
-                    default=os.path.join(os.getenv("TEST_TMPDIR", "/tmp"),
+                    default=os.path.join("/Users/jacques/Documents/GitHub/bayesianNN/tmp",
                                          "bayesian_neural_network/"),
                     help="Directory to put the model's fit.")
 flags.DEFINE_integer("viz_steps",
-                     default=10,
+                     default=300,
                      help="Frequency at which save visualizations.")
 flags.DEFINE_integer("num_monte_carlo",
                      default=50,
@@ -50,7 +54,7 @@ def plot_weight_posteriors(names, qm_vals, qs_vals, fname):
         names: A Python `iterable` of `str` variable names.
         qm_vals: A Python `iterable`, the same length as `names`,
           whose elements are Numpy `array`s, of any shape, containing
-          posterior means of weight varibles.
+          posterior means of weight varaibles.
         qs_vals: A Python `iterable`, the same length as `names`,
           whose elements are Numpy `array`s, of any shape, containing
           posterior standard deviations of weight varibles.
@@ -59,27 +63,27 @@ def plot_weight_posteriors(names, qm_vals, qs_vals, fname):
     fig = plt.Figure(figsize=(6, 3))
     canvas = backend_agg.FigureCanvasAgg(fig)
 
-    ax = fig.add_subplot(1, 2, 1)
+    ax = fig.add_subplot(1, 2, 1)  # plot posterior means
     for n, qm in zip(names, qm_vals):
         sns.distplot(qm.flatten(), ax=ax, label=n)
     ax.set_title("weight means")
-    ax.set_xlim([-1.5, 1.5])
+    ax.set_xlim([-.5, .5])
     ax.legend()
 
-    ax = fig.add_subplot(1, 2, 2)
+    ax = fig.add_subplot(1, 2, 2)  # plot posterior standard deviation
     for n, qs in zip(names, qs_vals):
         sns.distplot(qs.flatten(), ax=ax)
     ax.set_title("weight stddevs")
-    ax.set_xlim([0, 1.])
+    ax.set_xlim([0, .15])
 
-    fig.tight_layout()
+    fig.tight_layout()  # print figures
     canvas.print_figure(fname, format="png")
     print("saved {}".format(fname))
 
 
 def plot_heldout_prediction(input_vals, probs,
                             fname, n=10, title=""):
-    """Save a PNG plot visualizing posterior uncertainty on heldout data.
+    """Save a PNG plot visualizing posterior uncertainty on n first heldout data.
   Args:
     input_vals: A `float`-like Numpy `array` of shape
       `[num_heldout] + IMAGE_SHAPE`, containing heldout input images.
@@ -93,10 +97,10 @@ def plot_heldout_prediction(input_vals, probs,
     fig = plt.Figure(figsize=(9, 3 * n))
     canvas = backend_agg.FigureCanvasAgg(fig)
     for i in range(n):
-        ax = fig.add_subplot(n, 3, 3 * i + 1)
+        ax = fig.add_subplot(n, 3, 3 * i + 1)  # plot heldout input images
         ax.imshow(input_vals[i, :].reshape(IMAGE_SHAPE[:-1]), interpolation="None")
 
-        ax = fig.add_subplot(n, 3, 3 * i + 2)
+        ax = fig.add_subplot(n, 3, 3 * i + 2)  # plot barplots
         for prob_sample in probs:
             sns.barplot(np.arange(10), prob_sample[i, :], alpha=0.1, ax=ax)
             ax.set_ylim([0, 1])
@@ -151,9 +155,9 @@ def build_fake_data(num_examples=10):
     mnist_data = Dummy()
     mnist_data.train = Dummy()
     mnist_data.train.images = np.float32(np.random.randn(
-        num_examples, *IMAGE_SHAPE))
+        num_examples, *IMAGE_SHAPE))  # create random image
     mnist_data.train.labels = np.int32(np.random.permutation(
-        np.arange(num_examples)))
+        np.arange(num_examples)))  # create random labeling
     mnist_data.train.num_examples = num_examples
     mnist_data.validation = Dummy()
     mnist_data.validation.images = np.float32(np.random.randn(
@@ -161,7 +165,7 @@ def build_fake_data(num_examples=10):
     mnist_data.validation.labels = np.int32(np.random.permutation(
         np.arange(num_examples)))
     mnist_data.validation.num_examples = num_examples
-    return mnist_data
+    return mnist_data  # fake dataset
 
 
 def main(argv):
@@ -186,26 +190,26 @@ def main(argv):
     # variance stochastic gradients than naive reparameterization.
     with tf.name_scope("bayesian_neural_net", values=[images]):
         neural_net = tf.keras.Sequential([
-            tfp.layers.Convolution2DFlipout(6,
-                                            kernel_size=5,
+            tfp.layers.Convolution2DFlipout(4,  # optimal is 6
+                                            kernel_size=3,  # optimal is 5
                                             padding="SAME",
                                             activation=tf.nn.relu),
+            # tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
+            #                              strides=[2, 2],
+            #                              padding="SAME"),
+            # tfp.layers.Convolution2DFlipout(16,
+            #                                 kernel_size=5,
+            #                                 padding="SAME",
+            #                                 activation=tf.nn.relu),
             tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
                                          strides=[2, 2],
                                          padding="SAME"),
-            tfp.layers.Convolution2DFlipout(16,
-                                            kernel_size=5,
-                                            padding="SAME",
-                                            activation=tf.nn.relu),
-            tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
-                                         strides=[2, 2],
-                                         padding="SAME"),
-            tfp.layers.Convolution2DFlipout(120,
-                                            kernel_size=5,
+            tfp.layers.Convolution2DFlipout(16,  # optimal is 120
+                                            kernel_size=3,  # optimal is 5
                                             padding="SAME",
                                             activation=tf.nn.relu),
             tf.keras.layers.Flatten(),
-            tfp.layers.DenseFlipout(84, activation=tf.nn.relu),
+            tfp.layers.DenseFlipout(32, activation=tf.nn.relu),  # optimal is 84
             tfp.layers.DenseFlipout(10)
         ])
 
@@ -252,11 +256,11 @@ def main(argv):
         # Run the training loop.
         train_handle = sess.run(training_iterator.string_handle())
         heldout_handle = sess.run(heldout_iterator.string_handle())
-        for step in range(FLAGS.max_steps):
+        for step in range(FLAGS.max_steps):  # train network on training set
             _ = sess.run([train_op, accuracy_update_op],
                          feed_dict={handle: train_handle})
 
-            if step % 100 == 0:
+            if step % 100 == 0:  # show logs every 100 steps
                 loss_value, accuracy_value = sess.run(
                     [elbo_loss, accuracy], feed_dict={handle: train_handle})
                 print("Step: {:>3d} Loss: {:.3f} Accuracy: {:.3f}".format(
@@ -294,4 +298,8 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    print("Begin")
+    start = time.clock()
     tf.app.run()
+    end = time.clock()
+    print(f"Duration: {int(end-start)}")
