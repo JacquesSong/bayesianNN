@@ -29,14 +29,13 @@ flags.DEFINE_integer("batch_size",
                      default=128,
                      help="Batch size.")
 flags.DEFINE_string("data_dir",
-                    default="/Users/jacques/Documents/GitHub/bayesianNN/data",
+                    default=os.path.join(os.getcwd(), "data"),
                     help="Directory where data is stored (if using real data).")
 flags.DEFINE_string("model_dir",
-                    default=os.path.join("/Users/jacques/Documents/GitHub/bayesianNN/tmp",
-                                         "bayesian_neural_network/"),
+                    default=os.path.join(os.getcwd(), "bayesian"),
                     help="Directory to put the model's fit.")
 flags.DEFINE_integer("viz_steps",
-                     default=300,
+                     default=100,
                      help="Frequency at which save visualizations.")
 flags.DEFINE_integer("num_monte_carlo",
                      default=50,
@@ -266,7 +265,7 @@ def main(argv):
                 print("Step: {:>3d} Loss: {:.3f} Accuracy: {:.3f}".format(
                     step, loss_value, accuracy_value))
 
-            if (step + 1) % FLAGS.viz_steps == 0:
+            if step == 0 or (step + 1) % FLAGS.viz_steps == 0:
                 # Compute log prob of heldout set by averaging draws from the model:
                 # p(heldout | train) = int_model p(heldout|model) p(model|train)
                 #                   ~= 1/n * sum_{i=1}^n p(heldout | model_i)
@@ -298,8 +297,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    print("Begin")
-    start = time.clock()
     tf.app.run()
-    end = time.clock()
-    print(f"Duration: {int(end-start)}")
+
