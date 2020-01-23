@@ -2,7 +2,7 @@
 
 Project for Bayesian Statistics Class.
 
-In this repository, we implement two approaches for introducing uncertainty in neural networks.
+In this repository, we implement two approaches for introducing uncertainty in neural networks based on the code available in tensorflow_probability examples.
 
 # Get started
 
