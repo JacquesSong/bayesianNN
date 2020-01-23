@@ -5,7 +5,6 @@ import seaborn as sns
 import os
 import pandas as pd
 import warnings
-from tqdm import tqdm
 
 from matplotlib.backends import backend_agg
 from tensorflow.contrib.learn.python.learn.datasets import mnist
@@ -33,20 +32,17 @@ flags.DEFINE_string("data_dir",
 flags.DEFINE_string("model_dir",
                     default=os.path.join(os.getcwd(), "frequentist"),
                     help="Directory to put the model's fit.")
-flags.DEFINE_integer("num_monte_carlo",
-                     default=50,
-                     help="Network draws to compute predictive probabilities.")
 flags.DEFINE_integer("viz_steps",
-                     default=50,
+                     default=100,
                      help="Frequency at which save visualizations.")
 flags.DEFINE_integer("print_steps",
-                     default=20,
+                     default=100,
                      help="Frequency at which print logs")
 flags.DEFINE_integer("run_steps",
                      default=50,
                      help="Number of graph runs to bootstrap weights probabilities")
 flags.DEFINE_bool("fake_data",
-                  default=None,
+                  default=True,
                   help="If true, uses fake data. Defaults to real data.")
 
 FLAGS = flags.FLAGS
@@ -121,7 +117,7 @@ def plot_heldout_prediction(input_vals, probs,
     print("saved {}".format(fname))
 
 
-def build_input_pipeline(mnist_data, batch_size, heldout_size):
+def build_input_pipeline(mnist_data, batch_size, heldout_size, noisy_size):
     """Build an Iterator switching between train and heldout data."""
 
     # Build an iterator over training batches.
@@ -140,6 +136,15 @@ def build_input_pipeline(mnist_data, batch_size, heldout_size):
                       repeat().batch(heldout_size))
     heldout_iterator = tf.data.make_one_shot_iterator(heldout_frozen)
 
+    # Build a iterator over the noisy heldout set with batch_size=heldout_size,
+    # i.e., return the entire heldout set as a constant.
+    noisy_dataset = tf.data.Dataset.from_tensor_slices(
+        (mnist_data.noisy.images,
+         np.int32(mnist_data.noisy.labels)))
+    noisy_frozen = (noisy_dataset.take(noisy_size).
+                      repeat().batch(noisy_size))
+    noisy_iterator = tf.data.make_one_shot_iterator(noisy_frozen)
+
     # Combine these into a feedable iterator that can switch between training
     # and validation inputs.
     handle = tf.placeholder(tf.string, shape=[])
@@ -147,7 +152,7 @@ def build_input_pipeline(mnist_data, batch_size, heldout_size):
         handle, training_batches.output_types, training_batches.output_shapes)
     images, labels = feedable_iterator.get_next()
 
-    return images, labels, handle, training_iterator, heldout_iterator
+    return images, labels, handle, training_iterator, heldout_iterator, noisy_iterator
 
 
 def build_fake_data(num_examples=10):
@@ -157,18 +162,27 @@ def build_fake_data(num_examples=10):
         pass
 
     mnist_data = Dummy()
+    true_mnist = mnist.read_data_sets(FLAGS.data_dir, reshape=False)
+
+    # set-up training data
     mnist_data.train = Dummy()
-    mnist_data.train.images = np.float32(np.random.randn(
-        num_examples, *IMAGE_SHAPE))  # create random image
-    mnist_data.train.labels = np.int32(np.random.permutation(
-        np.arange(num_examples)))  # create random labeling
-    mnist_data.train.num_examples = num_examples
+    mnist_data.train.images = true_mnist.train.images
+    mnist_data.train.labels = true_mnist.train.labels
+    mnist_data.train.num_examples = len(mnist_data.train.images)
+
+    # set-up validation data
     mnist_data.validation = Dummy()
-    mnist_data.validation.images = np.float32(np.random.randn(
+    mnist_data.validation .images = true_mnist.validation.images[0:num_examples]
+    mnist_data.validation.labels = true_mnist.validation.labels[0:num_examples]
+    mnist_data.validation.num_examples = len(mnist_data.validation.images)
+
+    # set-up noisy data
+    mnist_data.noisy = Dummy()
+    mnist_data.noisy.images = np.float32(np.random.randn(  # create random images
         num_examples, *IMAGE_SHAPE))
-    mnist_data.validation.labels = np.int32(np.random.permutation(
+    mnist_data.noisy.labels = np.int32(np.random.permutation(  # create random labels
         np.arange(num_examples)))
-    mnist_data.validation.num_examples = num_examples
+    mnist_data.noisy.num_examples = num_examples
     return mnist_data  # fake dataset
 
 
@@ -189,8 +203,8 @@ def main(argv):
         mnist_data = mnist.read_data_sets(FLAGS.data_dir, reshape=False)
 
     (images, labels, handle,
-     training_iterator, heldout_iterator) = build_input_pipeline(
-        mnist_data, FLAGS.batch_size, mnist_data.validation.num_examples)
+     training_iterator, heldout_iterator, noisy_iterator) = build_input_pipeline(
+        mnist_data, FLAGS.batch_size, mnist_data.validation.num_examples, mnist_data.noisy.num_examples)
 
     # Build a Bayesian LeNet5 network. We use the Flipout Monte Carlo estimator
     # for the convolution and fully-connected layers: this enables lower
@@ -201,13 +215,13 @@ def main(argv):
                                    kernel_size=3,  # optimal is 5
                                    padding="SAME",
                                    activation=tf.nn.relu),
-            # tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
-            #                              strides=[2, 2],
-            #                              padding="SAME"),
-            # tfp.layers.Convolution2DFlipout(16,
-            #                                 kernel_size=5,
-            #                                 padding="SAME",
-            #                                 activation=tf.nn.relu),
+            tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
+                                         strides=[2, 2],
+                                         padding="SAME"),
+            tfp.layers.Convolution2DFlipout(16,
+                                            kernel_size=3,
+                                            padding="SAME",
+                                            activation=tf.nn.relu),
             tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
                                          strides=[2, 2],
                                          padding="SAME"),
@@ -251,6 +265,8 @@ def main(argv):
 
     # model wide variables
     weights_moments = np.empty((FLAGS.run_steps, FLAGS.max_steps // FLAGS.viz_steps, len(indices), 2))
+    probs_heldout = np.empty((FLAGS.run_steps, FLAGS.max_steps // FLAGS.viz_steps, 10, 10))
+    probs_noisy = np.empty((FLAGS.run_steps, FLAGS.max_steps // FLAGS.viz_steps, 10, 10))
 
     for run_index in range(FLAGS.run_steps):
 
@@ -268,6 +284,7 @@ def main(argv):
             # build handles
             train_handle = sess.run(training_iterator.string_handle())
             heldout_handle = sess.run(heldout_iterator.string_handle())
+            noisy_handle = sess.run(noisy_iterator.string_handle())
 
             # train network on training set
             for step in range(FLAGS.max_steps):
@@ -287,24 +304,10 @@ def main(argv):
                 if step == 0 or (step + 1) % FLAGS.viz_steps == 0:
 
                     # plot probs for last model only
-                    if run_index == FLAGS.run_steps - 1:
-                        # store likelihoods
-                        probs = np.asarray([sess.run((labels_pred.probs),
-                                                     feed_dict={handle: heldout_handle})
-                                            for _ in range(FLAGS.num_monte_carlo)])
-                        mean_probs = np.mean(probs, axis=0)
+                    probs_heldout[run_index, (step + 1) // FLAGS.viz_steps - 1] = np.array(sess.run(labels_pred.probs, feed_dict={handle: heldout_handle}))
 
-                        image_vals, label_vals = sess.run((images, labels),
-                                                          feed_dict={handle: heldout_handle})
-                        heldout_lp = np.mean(np.log(mean_probs[np.arange(mean_probs.shape[0]),
-                                                               label_vals.flatten()]))
-                        print(" ... Held-out nats: {:.3f}".format(heldout_lp))
-                        plot_heldout_prediction(image_vals, probs,
-                                                fname=os.path.join(
-                                                    FLAGS.model_dir,
-                                                    "step{:05d}_pred.png".format(step)),
-                                                title="mean heldout logprob {:.2f}"
-                                                .format(heldout_lp))
+                    # noisy data
+                    probs_noisy[run_index, (step + 1) // FLAGS.viz_steps - 1] = np.array(sess.run(labels_pred.probs, feed_dict={handle: noisy_handle}))
 
                     # store weight moments for each model
                     nn_moments = np.empty((len(indices), 2))
@@ -316,6 +319,26 @@ def main(argv):
                         except IndexError:
                             continue
                     weights_moments[run_index, (step + 1) // FLAGS.viz_steps - 1, :, :] = nn_moments
+            image_vals, label_vals = sess.run((images, labels),
+                                              feed_dict={handle: heldout_handle})
+            image_noisy, label_noisy = sess.run((images, labels),
+                                              feed_dict={handle: noisy_handle})
+
+    probs_heldout = np.transpose(probs_heldout, axes=(1, 0, 2, 3))
+
+    for t, probs in enumerate(probs_heldout):
+        plot_heldout_prediction(image_vals, probs,
+                                fname=os.path.join(
+                                    FLAGS.model_dir,
+                                    "step{:05d}_pred.png".format((t + 1) * FLAGS.viz_steps - 1)))
+
+    probs_noisy = np.transpose(probs_noisy, axes=(1, 0, 2, 3))
+
+    for t, probs in enumerate(probs_noisy):
+        plot_heldout_prediction(image_noisy, probs,
+                                fname=os.path.join(
+                                    FLAGS.model_dir,
+                                    "step{:05d}_noisy.png".format((t + 1) * FLAGS.viz_steps - 1)))
 
     weights_moments = np.transpose(weights_moments, axes=(1, 3, 2, 0))
 
@@ -328,6 +351,9 @@ def main(argv):
                                fname=os.path.join(
                                    FLAGS.model_dir,
                                    "step{:05d}_weights.png".format((t + 1) * FLAGS.viz_steps - 1)))
+
+
+
 
     return 0
 

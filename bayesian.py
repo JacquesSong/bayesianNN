@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import tensorflow.compat.v1 as tf
 import seaborn as sns
 import os
-import time
 import warnings
 
 from matplotlib.backends import backend_agg
@@ -23,7 +22,7 @@ flags.DEFINE_float("learning_rate",
                    default=0.005,
                    help="Initial learning rate.")
 flags.DEFINE_integer("max_steps",
-                     default=1000,
+                     default=200,
                      help="Number of training steps to run.")
 flags.DEFINE_integer("batch_size",
                      default=128,
@@ -35,13 +34,16 @@ flags.DEFINE_string("model_dir",
                     default=os.path.join(os.getcwd(), "bayesian"),
                     help="Directory to put the model's fit.")
 flags.DEFINE_integer("viz_steps",
-                     default=100,
+                     default=50,
                      help="Frequency at which save visualizations.")
+flags.DEFINE_integer("print_steps",
+                     default=20,
+                     help="Frequency at which print logs")
 flags.DEFINE_integer("num_monte_carlo",
                      default=50,
                      help="Network draws to compute predictive probabilities.")
 flags.DEFINE_bool("fake_data",
-                  default=None,
+                  default=True,
                   help="If true, uses fake data. Defaults to real data.")
 
 FLAGS = flags.FLAGS
@@ -83,7 +85,7 @@ def plot_weight_posteriors(names, qm_vals, qs_vals, fname):
 def plot_heldout_prediction(input_vals, probs,
                             fname, n=10, title=""):
     """Save a PNG plot visualizing posterior uncertainty on n first heldout data.
-  Args:
+    Args:
     input_vals: A `float`-like Numpy `array` of shape
       `[num_heldout] + IMAGE_SHAPE`, containing heldout input images.
     probs: A `float`-like Numpy array of shape `[num_monte_carlo,
@@ -92,7 +94,7 @@ def plot_heldout_prediction(input_vals, probs,
     fname: Python `str` filename to save the plot to.
     n: Python `int` number of datapoints to vizualize.
     title: Python `str` title for the plot.
-  """
+    """
     fig = plt.Figure(figsize=(9, 3 * n))
     canvas = backend_agg.FigureCanvasAgg(fig)
     for i in range(n):
@@ -116,7 +118,7 @@ def plot_heldout_prediction(input_vals, probs,
     print("saved {}".format(fname))
 
 
-def build_input_pipeline(mnist_data, batch_size, heldout_size):
+def build_input_pipeline(mnist_data, batch_size, heldout_size, noisy_size):
     """Build an Iterator switching between train and heldout data."""
 
     # Build an iterator over training batches.
@@ -126,7 +128,7 @@ def build_input_pipeline(mnist_data, batch_size, heldout_size):
         50000, reshuffle_each_iteration=True).repeat().batch(batch_size)
     training_iterator = tf.data.make_one_shot_iterator(training_batches)
 
-    # Build a iterator over the heldout set with batch_size=heldout_size,
+    # Build an iterator over the heldout set with batch_size=heldout_size,
     # i.e., return the entire heldout set as a constant.
     heldout_dataset = tf.data.Dataset.from_tensor_slices(
         (mnist_data.validation.images,
@@ -135,14 +137,22 @@ def build_input_pipeline(mnist_data, batch_size, heldout_size):
                       repeat().batch(heldout_size))
     heldout_iterator = tf.data.make_one_shot_iterator(heldout_frozen)
 
-    # Combine these into a feedable iterator that can switch between training
-    # and validation inputs.
+    # Build a iterator over the noisy heldout set with batch_size=heldout_size,
+    # i.e., return the entire heldout set as a constant.
+    noisy_dataset = tf.data.Dataset.from_tensor_slices(
+        (mnist_data.noisy.images,
+         np.int32(mnist_data.noisy.labels)))
+    noisy_frozen = (noisy_dataset.take(noisy_size).
+                      repeat().batch(noisy_size))
+    noisy_iterator = tf.data.make_one_shot_iterator(noisy_frozen)
+
+    # Combine these into a feedable iterator that can switch between training, validation and noisy inputs.
     handle = tf.placeholder(tf.string, shape=[])
     feedable_iterator = tf.data.Iterator.from_string_handle(
         handle, training_batches.output_types, training_batches.output_shapes)
     images, labels = feedable_iterator.get_next()
 
-    return images, labels, handle, training_iterator, heldout_iterator
+    return images, labels, handle, training_iterator, heldout_iterator, noisy_iterator
 
 
 def build_fake_data(num_examples=10):
@@ -152,18 +162,27 @@ def build_fake_data(num_examples=10):
         pass
 
     mnist_data = Dummy()
+    true_mnist = mnist.read_data_sets(FLAGS.data_dir, reshape=False)
+
+    # set-up training data
     mnist_data.train = Dummy()
-    mnist_data.train.images = np.float32(np.random.randn(
-        num_examples, *IMAGE_SHAPE))  # create random image
-    mnist_data.train.labels = np.int32(np.random.permutation(
-        np.arange(num_examples)))  # create random labeling
-    mnist_data.train.num_examples = num_examples
+    mnist_data.train.images = true_mnist.train.images
+    mnist_data.train.labels = true_mnist.train.labels
+    mnist_data.train.num_examples = len(mnist_data.train.images)
+
+    # set-up validation data
     mnist_data.validation = Dummy()
-    mnist_data.validation.images = np.float32(np.random.randn(
+    mnist_data.validation .images = true_mnist.validation.images[0:num_examples]
+    mnist_data.validation.labels = true_mnist.validation.labels[0:num_examples]
+    mnist_data.validation.num_examples = len(mnist_data.validation.images)
+
+    # set-up noisy data
+    mnist_data.noisy = Dummy()
+    mnist_data.noisy.images = np.float32(np.random.randn(  # create random images
         num_examples, *IMAGE_SHAPE))
-    mnist_data.validation.labels = np.int32(np.random.permutation(
+    mnist_data.noisy.labels = np.int32(np.random.permutation(  # create random labels
         np.arange(num_examples)))
-    mnist_data.validation.num_examples = num_examples
+    mnist_data.noisy.num_examples = num_examples
     return mnist_data  # fake dataset
 
 
@@ -181,8 +200,8 @@ def main(argv):
         mnist_data = mnist.read_data_sets(FLAGS.data_dir, reshape=False)
 
     (images, labels, handle,
-     training_iterator, heldout_iterator) = build_input_pipeline(
-        mnist_data, FLAGS.batch_size, mnist_data.validation.num_examples)
+     training_iterator, heldout_iterator, noisy_iterator) = build_input_pipeline(
+        mnist_data, FLAGS.batch_size, mnist_data.validation.num_examples, mnist_data.noisy.num_examples)
 
     # Build a Bayesian LeNet5 network. We use the Flipout Monte Carlo estimator
     # for the convolution and fully-connected layers: this enables lower
@@ -190,16 +209,16 @@ def main(argv):
     with tf.name_scope("bayesian_neural_net", values=[images]):
         neural_net = tf.keras.Sequential([
             tfp.layers.Convolution2DFlipout(4,  # optimal is 6
-                                            kernel_size=3,  # optimal is 5
+                                            kernel_size=3,
                                             padding="SAME",
                                             activation=tf.nn.relu),
-            # tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
-            #                              strides=[2, 2],
-            #                              padding="SAME"),
-            # tfp.layers.Convolution2DFlipout(16,
-            #                                 kernel_size=5,
-            #                                 padding="SAME",
-            #                                 activation=tf.nn.relu),
+            tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
+                                         strides=[2, 2],
+                                         padding="SAME"),
+            tfp.layers.Convolution2DFlipout(16,
+                                            kernel_size=3,
+                                            padding="SAME",
+                                            activation=tf.nn.relu),
             tf.keras.layers.MaxPooling2D(pool_size=[2, 2],
                                          strides=[2, 2],
                                          padding="SAME"),
@@ -255,11 +274,12 @@ def main(argv):
         # Run the training loop.
         train_handle = sess.run(training_iterator.string_handle())
         heldout_handle = sess.run(heldout_iterator.string_handle())
+        noisy_handle = sess.run(noisy_iterator.string_handle())
         for step in range(FLAGS.max_steps):  # train network on training set
             _ = sess.run([train_op, accuracy_update_op],
                          feed_dict={handle: train_handle})
 
-            if step % 100 == 0:  # show logs every 100 steps
+            if step % FLAGS.print_steps == 0:  # show logs
                 loss_value, accuracy_value = sess.run(
                     [elbo_loss, accuracy], feed_dict={handle: train_handle})
                 print("Step: {:>3d} Loss: {:.3f} Accuracy: {:.3f}".format(
@@ -270,6 +290,8 @@ def main(argv):
                 # p(heldout | train) = int_model p(heldout|model) p(model|train)
                 #                   ~= 1/n * sum_{i=1}^n p(heldout | model_i)
                 # where model_i is a draw from the posterior p(model|train).
+
+                # validation data
                 probs = np.asarray([sess.run((labels_distribution.probs),
                                              feed_dict={handle: heldout_handle})
                                     for _ in range(FLAGS.num_monte_carlo)])
@@ -281,6 +303,34 @@ def main(argv):
                                                        label_vals.flatten()]))
                 print(" ... Held-out nats: {:.3f}".format(heldout_lp))
 
+                plot_heldout_prediction(image_vals, probs,
+                                        fname=os.path.join(
+                                            FLAGS.model_dir,
+                                            "step{:05d}_pred.png".format(step)),
+                                        title="mean heldout logprob {:.2f}"
+                                        .format(heldout_lp))
+
+                # noisy data
+                probs = np.asarray([sess.run((labels_distribution.probs),
+                                             feed_dict={handle: noisy_handle})
+                                    for _ in range(FLAGS.num_monte_carlo)])
+                mean_probs = np.mean(probs, axis=0)
+
+                image_vals, label_vals = sess.run((images, labels),
+                                                  feed_dict={handle: noisy_handle})
+                noisy_lp = np.mean(np.log(mean_probs[np.arange(mean_probs.shape[0]),
+                                                       label_vals.flatten()]))
+                print(" ... Noisy nats: {:.3f}".format(noisy_lp))
+
+                plot_heldout_prediction(image_vals, probs,
+                                        fname=os.path.join(
+                                            FLAGS.model_dir,
+                                            "step{:05d}_noisy.png".format(step)),
+                                        title="mean noisy logprob {:.2f}"
+                                        .format(heldout_lp))
+
+
+
                 qm_vals, qs_vals = sess.run((qmeans, qstds))
 
                 plot_weight_posteriors(names, qm_vals, qs_vals,
@@ -288,12 +338,6 @@ def main(argv):
                                            FLAGS.model_dir,
                                            "step{:05d}_weights.png".format(step)))
 
-                plot_heldout_prediction(image_vals, probs,
-                                        fname=os.path.join(
-                                            FLAGS.model_dir,
-                                            "step{:05d}_pred.png".format(step)),
-                                        title="mean heldout logprob {:.2f}"
-                                        .format(heldout_lp))
 
 
 if __name__ == "__main__":
