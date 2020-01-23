@@ -15,7 +15,7 @@ Default values are those written in the associated report.
 
 ```bayesian.py``` implements a bayesian variational approach. It can be launched from the terminal by simply choosing the right environment containing the following packages: seaborn, numpy, tensorflow_probability, pyplot. The command is the following:
 
-```python frequentist.py --learning_rate --max_steps --batch_size --data_dir --model_dir --viz_steps --print_steps --num_monte_carlo```
+```python bayesian.py --learning_rate --max_steps --batch_size --data_dir --model_dir --viz_steps --print_steps --num_monte_carlo```
 
 Default values are those written in the associated report.
 
