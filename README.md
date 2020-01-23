@@ -19,6 +19,6 @@ Default values are those written in the associated report.
 
 Default values are those written in the associated report.
 
-**WARNING
+**WARNING**
 
 The ```--fake_data``` flag should always be ```True``` which is the default value. Program will not run otherwise.
